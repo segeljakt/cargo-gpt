@@ -9,4 +9,4 @@ documentation = "https://github.com/segeljakt/cargo-gpt"
 repository = "https://github.com/segeljakt/cargo-gpt"
 
 [dependencies]
-walkdir = "2.3.3"
+ignore = "0.4.20"
