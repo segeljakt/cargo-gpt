@@ -1,0 +1,12 @@
+[package]
+name = "cargo-gpt"
+version = "0.1.1"
+edition = "2021"
+description = "Dump your crate contents into a format which can be passed to GPT"
+license-file = "LICENSE"
+homepage = "https://github.com/segeljakt/cargo-gpt"
+documentation = "https://github.com/segeljakt/cargo-gpt"
+repository = "https://github.com/segeljakt/cargo-gpt"
+
+[dependencies]
+walkdir = "2.3.3"
