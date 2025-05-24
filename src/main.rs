@@ -145,7 +145,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let extensions = determine_extensions(&args)?;
-            read_dir_to_writer(&root, &root, &extensions, &mut stdout_lock, &args)?;
+            read_dir_to_writer(&root, &root, &extensions, &mut stdout_lock)?;
         }
     } else {
         // Collect output in a string buffer for clipboard
@@ -171,7 +171,7 @@ fn main() -> Result<()> {
             }
             let extensions = determine_extensions(&args)?;
             let mut buffer = Vec::new();
-            read_dir_to_writer(&root, &root, &extensions, &mut buffer, &args)?;
+            read_dir_to_writer(&root, &root, &extensions, &mut buffer)?;
             String::from_utf8(buffer).context("Invalid UTF-8 in output")?
         };
 
@@ -760,12 +760,7 @@ fn should_include_file(path: &Path, extensions: &HashSet<String>) -> bool {
     false
 }
 
-fn read_file_to_writer<W: Write>(
-    path: &Path,
-    root: &Path,
-    writer: &mut W,
-    use_copy: bool,
-) -> Result<()> {
+fn read_file_to_writer<W: Write>(path: &Path, root: &Path, writer: &mut W) -> Result<()> {
     let relative_path = path
         .strip_prefix(root)
         .context("Failed to strip prefix")?
@@ -773,21 +768,11 @@ fn read_file_to_writer<W: Write>(
 
     writeln!(writer, "// {}", relative_path)?;
 
-    if use_copy {
-        // Use efficient copy for --all flag
-        let mut file = File::open(path).context("Failed to open file")?;
-        std::io::copy(&mut file, writer).context("Failed to copy file")?;
-        // Ensure we end with a newline for separation
-        writeln!(writer)?;
-    } else {
-        // Use string-based approach for potential transformations
-        let file_content = fs::read_to_string(path).context("Failed to read file")?;
-        write!(writer, "{}", file_content)?;
-        if !file_content.ends_with('\n') {
-            writeln!(writer)?;
-        }
-        writeln!(writer)?;
-    }
+    // Use efficient copy for --all flag
+    let mut file = File::open(path).context("Failed to open file")?;
+    std::io::copy(&mut file, writer).context("Failed to copy file")?;
+    // Ensure we end with a newline for separation
+    writeln!(writer)?;
 
     Ok(())
 }
@@ -797,18 +782,15 @@ fn read_dir_to_writer<W: Write>(
     root: &Path,
     extensions: &HashSet<String>,
     writer: &mut W,
-    args: &Args,
 ) -> Result<()> {
     let walk = WalkBuilder::new(path)
         .filter_entry(|e| {
             e.file_name()
                 .to_str()
-                .map(|s| !s.starts_with('.') && s != "target" && s != "node_modules")
+                .map(|s| !s.starts_with('.') && s != "target")
                 .unwrap_or(false)
         })
         .build();
-
-    let use_copy = args.all;
 
     for entry in walk.filter_map(Result::ok) {
         if entry
@@ -817,11 +799,10 @@ fn read_dir_to_writer<W: Write>(
             .is_file()
         {
             if should_include_file(entry.path(), extensions) {
-                read_file_to_writer(entry.path(), root, writer, use_copy)?;
+                read_file_to_writer(entry.path(), root, writer)?;
             }
         }
     }
 
     Ok(())
 }
-
