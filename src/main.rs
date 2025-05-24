@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -95,7 +96,6 @@ impl Default for Config {
     }
 }
 
-// Update the main function to pass the --only flag
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -115,35 +115,66 @@ fn main() -> Result<()> {
 
     let root = std::env::current_dir().context("Failed to get current directory")?;
 
-    // Collect output in a string buffer
-    let output_buffer = if args.functions {
-        let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
-        if selected_functions.is_empty() {
-            eprintln!("No functions selected.");
-            return Ok(());
-        }
-
-        // Generate output with selected functions, passing the --only flag
-        generate_output_with_selected_functions(&root, &selected_functions, &args)?
-    } else {
-        if args.only {
-            eprintln!("--only flag requires --functions flag");
-            return Ok(());
-        }
-        let extensions = determine_extensions(&args)?;
-        read_dir_to_string(&root, &root, &extensions)?
-    };
-
-    let output_buffer = output_buffer.trim();
-
-    if output_buffer.is_empty() {
-        eprintln!("No content generated with the current selection.");
-        return Ok(());
-    }
-
     if args.print {
-        println!("{}", output_buffer);
+        // Write directly to stdout
+        let stdout = io::stdout();
+        let mut stdout_lock = stdout.lock();
+
+        if args.functions {
+            let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
+            if selected_functions.is_empty() {
+                eprintln!("No functions selected.");
+                return Ok(());
+            }
+            generate_output_with_selected_functions(
+                &root,
+                &selected_functions,
+                &args,
+                &mut stdout_lock,
+            )?;
+        } else {
+            if args.only {
+                eprintln!("--only flag requires --functions flag");
+                return Ok(());
+            }
+            let extensions = determine_extensions(&args)?;
+            read_dir_to_writer(&root, &root, &extensions, &mut stdout_lock)?;
+        }
     } else {
+        // Collect output in a string buffer for clipboard
+        let output_buffer = if args.functions {
+            let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
+            if selected_functions.is_empty() {
+                eprintln!("No functions selected.");
+                return Ok(());
+            }
+
+            let mut buffer = Vec::new();
+            generate_output_with_selected_functions(
+                &root,
+                &selected_functions,
+                &args,
+                &mut buffer,
+            )?;
+            String::from_utf8(buffer).context("Invalid UTF-8 in output")?
+        } else {
+            if args.only {
+                eprintln!("--only flag requires --functions flag");
+                return Ok(());
+            }
+            let extensions = determine_extensions(&args)?;
+            let mut buffer = Vec::new();
+            read_dir_to_writer(&root, &root, &extensions, &mut buffer)?;
+            String::from_utf8(buffer).context("Invalid UTF-8 in output")?
+        };
+
+        let output_buffer = output_buffer.trim();
+
+        if output_buffer.is_empty() {
+            eprintln!("No content generated with the current selection.");
+            return Ok(());
+        }
+
         // Copy to clipboard
         Clipboard::new()
             .context("Failed to access clipboard")?
@@ -441,15 +472,15 @@ fn interactive_select_functions(
     Ok(selected_names)
 }
 
-// Update the generate_output_with_selected_functions to handle --only flag
-fn generate_output_with_selected_functions(
+// Updated to take a generic writer
+fn generate_output_with_selected_functions<W: Write>(
     root: &Path,
     selected_functions: &[String],
     args: &Args,
-) -> Result<String> {
+    writer: &mut W,
+) -> Result<()> {
     let extensions = determine_extensions(args)?;
 
-    let mut output_buffer = String::new();
     let mut processed_files = HashSet::new();
 
     // Collect all files
@@ -497,7 +528,8 @@ fn generate_output_with_selected_functions(
             };
 
             if !transformed_content.trim().is_empty() {
-                output_buffer.push_str(&format!("// {}\n{}\n", relative_path, transformed_content));
+                writeln!(writer, "// {}", relative_path)?;
+                writeln!(writer, "{}", transformed_content)?;
             }
         } else if !args.only {
             // For non-Rust files, include them only if not using --only
@@ -507,11 +539,13 @@ fn generate_output_with_selected_functions(
             } else {
                 format!("{}\n", file_content)
             };
-            output_buffer.push_str(&format!("// {}\n{}\n", relative_path, content_with_newline));
+            writeln!(writer, "// {}", relative_path)?;
+            write!(writer, "{}", content_with_newline)?;
+            writeln!(writer)?;
         }
     }
 
-    Ok(output_buffer)
+    Ok(())
 }
 
 fn extract_only_selected_functions(source: &str, functions_to_keep: &[String]) -> String {
@@ -713,26 +747,29 @@ fn should_include_file(path: &Path, extensions: &HashSet<String>) -> bool {
     false
 }
 
-fn read_file(path: &Path, root: &Path) -> Result<String> {
+fn read_file_to_writer<W: Write>(path: &Path, root: &Path, writer: &mut W) -> Result<()> {
     let file_content = fs::read_to_string(path).context("Failed to read file")?;
     let relative_path = path
         .strip_prefix(root)
         .context("Failed to strip prefix")?
         .display();
 
-    // Ensure file content ends with newline, then add another for separation
-    let content_with_newline = if file_content.ends_with('\n') {
-        file_content
-    } else {
-        format!("{}\n", file_content)
-    };
+    writeln!(writer, "// {}", relative_path)?;
+    write!(writer, "{}", file_content)?;
+    if !file_content.ends_with('\n') {
+        writeln!(writer)?;
+    }
+    writeln!(writer)?;
 
-    Ok(format!("// {}\n{}\n", relative_path, content_with_newline))
+    Ok(())
 }
 
-fn read_dir_to_string(path: &Path, root: &Path, extensions: &HashSet<String>) -> Result<String> {
-    let mut result = String::new();
-
+fn read_dir_to_writer<W: Write>(
+    path: &Path,
+    root: &Path,
+    extensions: &HashSet<String>,
+    writer: &mut W,
+) -> Result<()> {
     let walk = WalkBuilder::new(path)
         .filter_entry(|e| {
             e.file_name()
@@ -749,11 +786,11 @@ fn read_dir_to_string(path: &Path, root: &Path, extensions: &HashSet<String>) ->
             .is_file()
         {
             if should_include_file(entry.path(), extensions) {
-                let file_content = read_file(entry.path(), root)?;
-                result.push_str(&file_content);
+                read_file_to_writer(entry.path(), root, writer)?;
             }
         }
     }
 
-    Ok(result)
+    Ok(())
 }
+
