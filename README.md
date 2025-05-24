@@ -1,6 +1,6 @@
 # `cargo-gpt`
 
-ChatGPT can now handle up to 25000 words of input, making it possible to analyze medium-sized software projects / Rust crates. This is a basic utility which writes all Rust source code in your crate plus markdown documentation and directory structure to standard output so it can be passed as input to ChatGPT.
+This is a basic utility which writes Rust source code in your crate plus markdown documentation and directory structure to standard output so it can be passed as input to ChatGPT.
 
 ## Installation
 
