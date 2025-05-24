@@ -12,6 +12,10 @@ use clap::Parser;
 use clap::Subcommand;
 use ignore::WalkBuilder;
 use inquire::MultiSelect;
+use ra_ap_syntax::{
+    ast::{self, AstNode, HasName},
+    SourceFile,
+};
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -26,7 +30,7 @@ struct Args {
     #[arg(short, long, value_delimiter = ',')]
     extensions: Option<Vec<String>>,
 
-    /// Use interactive mode to select files
+    /// Use interactive mode to select functions/methods
     #[arg(short, long)]
     interactive: bool,
 
@@ -65,8 +69,13 @@ struct Config {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct SelectionHistory {
-    /// Map of project root path to selected files
+    /// Map of project root path to selected functions
     selections: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionInfo {
+    display_name: String, // filepath::function_name
 }
 
 impl Default for Config {
@@ -113,21 +122,19 @@ fn main() -> Result<()> {
     let root = std::env::current_dir().context("Failed to get current directory")?;
 
     // Collect output in a string buffer
-    let mut output_buffer = String::new();
-
-    if args.interactive {
-        let filepaths = interactive_select_files(&root, args.config.as_ref())?;
-        if filepaths.is_empty() {
-            eprintln!("No files selected.");
+    let output_buffer = if args.interactive {
+        let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
+        if selected_functions.is_empty() {
+            eprintln!("No functions selected.");
             return Ok(());
         }
-        for filepath in filepaths {
-            output_buffer.push_str(&read_file(&filepath, &root)?);
-        }
+
+        // Generate output with selected functions
+        generate_output_with_selected_functions(&root, &selected_functions, args.config.as_ref())?
     } else {
         let extensions = determine_extensions(&args)?;
-        output_buffer = read_dir_to_string(&root, &root, &extensions)?;
-    }
+        read_dir_to_string(&root, &root, &extensions)?
+    };
 
     let output_buffer = output_buffer.trim();
 
@@ -137,7 +144,6 @@ fn main() -> Result<()> {
     }
 
     // Copy to clipboard
-
     Clipboard::new()
         .context("Failed to access clipboard")?
         .set_text(output_buffer)
@@ -275,36 +281,120 @@ fn get_default_config_path() -> Result<PathBuf> {
     Ok(config_dir.join("config.toml"))
 }
 
-fn interactive_select_files(root: &Path, config_path: Option<&PathBuf>) -> Result<Vec<PathBuf>> {
-    // First, collect all files that match our criteria
-    let config = load_config(config_path)?;
-    let mut extensions: HashSet<String> = config.default_extensions.into_iter().collect();
+fn extract_functions_from_rust_file(file_path: &Path, root: &Path) -> Result<Vec<FunctionInfo>> {
+    let content = fs::read_to_string(file_path).context("Failed to read file")?;
+    let parsed = SourceFile::parse(&content, ra_ap_syntax::Edition::Edition2024);
+    let syntax_tree = parsed.tree();
 
-    if let Some(always_include) = config.always_include {
-        extensions.extend(always_include);
+    let relative_path = file_path
+        .strip_prefix(root)
+        .unwrap_or(file_path)
+        .display()
+        .to_string();
+
+    let mut functions = Vec::new();
+
+    // Extract standalone functions
+    for func in syntax_tree.syntax().descendants().filter_map(ast::Fn::cast) {
+        if let Some(name) = func.name() {
+            let function_name = name.text().to_string();
+            let display_name = format!("{}::{}", relative_path, function_name);
+            functions.push(FunctionInfo { display_name });
+        }
     }
 
-    let mut available_files = Vec::new();
-    collect_files(root, &extensions, &mut available_files)?;
+    // Extract methods from impl blocks
+    for impl_block in syntax_tree
+        .syntax()
+        .descendants()
+        .filter_map(ast::Impl::cast)
+    {
+        let type_name = impl_block
+            .self_ty()
+            .and_then(|ty| {
+                // Try to get the type name - this is a simplified approach
+                ty.syntax().first_token().map(|t| t.text().to_string())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
 
-    if available_files.is_empty() {
-        eprintln!("No files found matching the configured extensions");
-        eprintln!("You can generate a config file with: cargo gpt --generate-config");
+        for func in impl_block.syntax().descendants().filter_map(ast::Fn::cast) {
+            if let Some(name) = func.name() {
+                let function_name = name.text().to_string();
+                let display_name = format!("{}::{}::{}", relative_path, type_name, function_name);
+                functions.push(FunctionInfo { display_name });
+            }
+        }
+    }
+
+    // Extract methods from trait impl blocks
+    for impl_block in syntax_tree
+        .syntax()
+        .descendants()
+        .filter_map(ast::Impl::cast)
+    {
+        if let Some(trait_) = impl_block.trait_() {
+            let trait_name = trait_
+                .syntax()
+                .last_token()
+                .map(|t| t.text().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let type_name = impl_block
+                .self_ty()
+                .and_then(|ty| ty.syntax().first_token().map(|t| t.text().to_string()))
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            for func in impl_block.syntax().descendants().filter_map(ast::Fn::cast) {
+                if let Some(name) = func.name() {
+                    let function_name = name.text().to_string();
+                    let display_name = format!(
+                        "{}::{}::{}::{}",
+                        relative_path, type_name, trait_name, function_name
+                    );
+                    functions.push(FunctionInfo { display_name });
+                }
+            }
+        }
+    }
+
+    Ok(functions)
+}
+
+fn interactive_select_functions(
+    root: &Path,
+    _config_path: Option<&PathBuf>,
+) -> Result<Vec<String>> {
+    // First, collect all Rust files and extract functions
+    let extensions: HashSet<String> = vec!["rs".to_string()].into_iter().collect(); // Focus on Rust files for function extraction
+
+    let mut rust_files = Vec::new();
+    collect_files(root, &extensions, &mut rust_files)?;
+
+    if rust_files.is_empty() {
+        eprintln!("No Rust files found in the project");
         return Ok(Vec::new());
     }
 
-    // Sort files for consistent ordering
-    available_files.sort();
+    // Extract all functions from all Rust files
+    let mut all_functions = Vec::new();
+    for file_path in rust_files {
+        match extract_functions_from_rust_file(&file_path, root) {
+            Ok(mut functions) => all_functions.append(&mut functions),
+            Err(e) => eprintln!("Warning: Failed to parse {}: {}", file_path.display(), e),
+        }
+    }
 
-    // Convert to relative path strings for display
-    let file_display_names: Vec<String> = available_files
+    if all_functions.is_empty() {
+        eprintln!("No functions found in Rust files");
+        return Ok(Vec::new());
+    }
+
+    // Sort functions for consistent ordering
+    all_functions.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+
+    let function_display_names: Vec<String> = all_functions
         .iter()
-        .map(|path| {
-            path.strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        })
+        .map(|f| f.display_name.clone())
         .collect();
 
     // Load previous selections
@@ -312,14 +402,14 @@ fn interactive_select_files(root: &Path, config_path: Option<&PathBuf>) -> Resul
     let project_key = root.display().to_string();
     let previous_selections = history.selections.get(&project_key);
 
-    // Determine default selections (all files by default, or previous selection)
-    let default_selected: Vec<usize> = if let Some(prev_files) = previous_selections {
+    // Determine default selections
+    let default_selected: Vec<usize> = if let Some(prev_functions) = previous_selections {
         // Use previous selection
-        file_display_names
+        function_display_names
             .iter()
             .enumerate()
-            .filter_map(|(i, file)| {
-                if prev_files.contains(file) {
+            .filter_map(|(i, func)| {
+                if prev_functions.contains(func) {
                     Some(i)
                 } else {
                     None
@@ -327,34 +417,133 @@ fn interactive_select_files(root: &Path, config_path: Option<&PathBuf>) -> Resul
             })
             .collect()
     } else {
-        // Select all files by default
-        (0..file_display_names.len()).collect()
+        // Select all functions by default
+        (0..function_display_names.len()).collect()
     };
 
-    let selected_names = MultiSelect::new("Select files to include:", file_display_names.clone())
-        .with_default(&default_selected)
-        .with_vim_mode(true)
-        .with_help_message(
-            "j/k: navigate, space: toggle, enter: complete, h: clear all, l: select all",
-        )
-        .prompt()
-        .context("Failed to get user selection")?;
+    let selected_names = MultiSelect::new(
+        "Select functions/methods to include:",
+        function_display_names.clone(),
+    )
+    .with_default(&default_selected)
+    .with_vim_mode(true)
+    .with_page_size(20) // Show 20 items at once instead of default (7)
+    .with_help_message("↑↓/jk: navigate, space: toggle, enter: confirm")
+    .prompt()
+    .context("Failed to get user selection")?;
 
     // Save the selection
     save_selection_history(&project_key, &selected_names)?;
 
-    // Convert back to full paths
-    let selected_paths: Vec<PathBuf> = selected_names
-        .into_iter()
-        .filter_map(|name| {
-            file_display_names
-                .iter()
-                .position(|f| f == &name)
-                .map(|index| available_files[index].clone())
-        })
-        .collect();
+    Ok(selected_names)
+}
 
-    Ok(selected_paths)
+fn generate_output_with_selected_functions(
+    root: &Path,
+    selected_functions: &[String],
+    config_path: Option<&PathBuf>,
+) -> Result<String> {
+    let extensions = determine_extensions(&Args {
+        command: None,
+        extensions: None,
+        interactive: false,
+        config: config_path.cloned(),
+        show_defaults: false,
+        generate_config: false,
+    })?;
+
+    let mut output_buffer = String::new();
+    let mut processed_files = HashSet::new();
+
+    // Collect all files
+    let mut all_files = Vec::new();
+    collect_files(root, &extensions, &mut all_files)?;
+
+    for file_path in all_files {
+        if processed_files.contains(&file_path) {
+            continue;
+        }
+        processed_files.insert(file_path.clone());
+
+        let relative_path = file_path
+            .strip_prefix(root)
+            .unwrap_or(&file_path)
+            .display()
+            .to_string();
+
+        // For Rust files, we need to transform them based on selected functions
+        if file_path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            let content = fs::read_to_string(&file_path).context("Failed to read file")?;
+
+            // Extract function names that should be kept (not elided) for this specific file
+            let functions_to_keep: Vec<String> = selected_functions
+                .iter()
+                .filter_map(|display_name| {
+                    if display_name.starts_with(&format!("{}::", relative_path)) {
+                        // Extract just the function name from display_name
+                        display_name.split("::").last().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let transformed_content = if functions_to_keep.is_empty() {
+                // If no functions are selected, elide all function bodies
+                transform_rust_file(&content, &[])
+            } else {
+                // Keep selected functions, elide others
+                transform_rust_file(&content, &functions_to_keep)
+            };
+
+            output_buffer.push_str(&format!("// {}\n{}\n", relative_path, transformed_content));
+        } else {
+            // For non-Rust files, include them as-is
+            let file_content = fs::read_to_string(&file_path).context("Failed to read file")?;
+            let content_with_newline = if file_content.ends_with('\n') {
+                file_content
+            } else {
+                format!("{}\n", file_content)
+            };
+            output_buffer.push_str(&format!("// {}\n{}\n", relative_path, content_with_newline));
+        }
+    }
+
+    Ok(output_buffer)
+}
+
+fn transform_rust_file(source: &str, functions_to_keep: &[String]) -> String {
+    let parsed = SourceFile::parse(source, ra_ap_syntax::Edition::Edition2024);
+    let root = parsed.tree();
+
+    let mut replacements = Vec::new();
+
+    // Find all function bodies that need to be elided
+    for func in root.syntax().descendants().filter_map(ast::Fn::cast) {
+        if let Some(name) = func.name() {
+            let func_name = name.text().to_string();
+            // If this function is NOT in the keep list, elide its body
+            if !functions_to_keep.contains(&func_name) {
+                if let Some(body) = func.body() {
+                    let range = body.syntax().text_range();
+                    replacements.push((range, " { /* ... */ }".to_string()));
+                }
+            }
+        }
+    }
+
+    // Sort replacements by position (reverse order to avoid offset issues)
+    replacements.sort_by_key(|(range, _)| std::cmp::Reverse(range.start()));
+
+    // Apply replacements
+    let mut result = source.to_string();
+    for (range, replacement) in replacements {
+        let start = usize::from(range.start());
+        let end = usize::from(range.end());
+        result.replace_range(start..end, &replacement);
+    }
+
+    result
 }
 
 fn collect_files(
@@ -401,7 +590,7 @@ fn load_selection_history() -> Result<SelectionHistory> {
         .or_else(|_| Ok(SelectionHistory::default()))
 }
 
-fn save_selection_history(project_key: &str, selected_files: &[String]) -> Result<()> {
+fn save_selection_history(project_key: &str, selected_functions: &[String]) -> Result<()> {
     let history_path = get_selection_history_path()?;
 
     if let Some(parent) = history_path.parent() {
@@ -411,7 +600,7 @@ fn save_selection_history(project_key: &str, selected_files: &[String]) -> Resul
     let mut history = load_selection_history().unwrap_or_default();
     history
         .selections
-        .insert(project_key.to_string(), selected_files.to_vec());
+        .insert(project_key.to_string(), selected_functions.to_vec());
 
     let history_content =
         serde_json::to_string_pretty(&history).context("Failed to serialize selection history")?;
