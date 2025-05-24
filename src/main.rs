@@ -20,7 +20,7 @@ use ra_ap_syntax::{
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(name = "cargo-gpt")]
 #[command(about = "Dump your crate contents into a format which can be passed to GPT")]
 struct Args {
@@ -54,6 +54,9 @@ struct Args {
     /// Include only the selected functions (excludes imports, structs, traits, etc.)
     #[arg(long)]
     only: bool,
+
+    #[arg(long)]
+    print: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,12 +124,7 @@ fn main() -> Result<()> {
         }
 
         // Generate output with selected functions, passing the --only flag
-        generate_output_with_selected_functions(
-            &root,
-            &selected_functions,
-            args.config.as_ref(),
-            args.only,
-        )?
+        generate_output_with_selected_functions(&root, &selected_functions, &args)?
     } else {
         if args.only {
             eprintln!("--only flag requires --functions flag");
@@ -143,15 +141,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Copy to clipboard
-    Clipboard::new()
-        .context("Failed to access clipboard")?
-        .set_text(output_buffer)
-        .context("Failed to copy to clipboard")?;
-
-    if args.only {
-        eprintln!("Selected functions copied to clipboard!");
+    if args.print {
+        println!("{}", output_buffer);
     } else {
+        // Copy to clipboard
+        Clipboard::new()
+            .context("Failed to access clipboard")?
+            .set_text(output_buffer)
+            .context("Failed to copy to clipboard")?;
+
         eprintln!(
             "Content copied to clipboard! You can now paste it into your favorite AI assistant."
         );
@@ -447,19 +445,9 @@ fn interactive_select_functions(
 fn generate_output_with_selected_functions(
     root: &Path,
     selected_functions: &[String],
-    config_path: Option<&PathBuf>,
-    only_selected: bool,
+    args: &Args,
 ) -> Result<String> {
-    let extensions = determine_extensions(&Args {
-        command: None,
-        functions: false,
-        config: config_path.cloned(),
-        generate_config: false,
-        readme: false,
-        toml: false,
-        all: false,
-        only: false,
-    })?;
+    let extensions = determine_extensions(args)?;
 
     let mut output_buffer = String::new();
     let mut processed_files = HashSet::new();
@@ -497,7 +485,7 @@ fn generate_output_with_selected_functions(
                 })
                 .collect();
 
-            let transformed_content = if only_selected {
+            let transformed_content = if args.only {
                 // Extract only the selected functions
                 extract_only_selected_functions(&content, &functions_to_keep)
             } else if functions_to_keep.is_empty() {
@@ -511,7 +499,7 @@ fn generate_output_with_selected_functions(
             if !transformed_content.trim().is_empty() {
                 output_buffer.push_str(&format!("// {}\n{}\n", relative_path, transformed_content));
             }
-        } else if !only_selected {
+        } else if !args.only {
             // For non-Rust files, include them only if not using --only
             let file_content = fs::read_to_string(&file_path).context("Failed to read file")?;
             let content_with_newline = if file_content.ends_with('\n') {
