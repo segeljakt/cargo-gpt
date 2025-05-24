@@ -1,6 +1,6 @@
 [package]
 name = "cargo-gpt"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Dump your crate contents into a format which can be passed to GPT"
 license-file = "LICENSE"
@@ -10,3 +10,11 @@ repository = "https://github.com/segeljakt/cargo-gpt"
 
 [dependencies]
 ignore = "0.4.20"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+dirs = "6.0"
+inquire = "0.7"
+anyhow = "1.0"
+serde_json = "1.0"
+arboard = "3.5.0"
