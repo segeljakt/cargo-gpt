@@ -12,6 +12,7 @@ use clap::Parser;
 use clap::Subcommand;
 use ignore::WalkBuilder;
 use inquire::MultiSelect;
+use ra_ap_syntax::ast::HasGenericParams;
 use ra_ap_syntax::{
     ast::{self, AstNode, HasName},
     SourceFile,
@@ -49,6 +50,10 @@ struct Args {
     /// Select all functions (no filtering/elision)
     #[arg(long)]
     all: bool,
+
+    /// Include only the selected functions (excludes imports, structs, traits, etc.)
+    #[arg(long)]
+    only: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,6 +92,7 @@ impl Default for Config {
     }
 }
 
+// Update the main function to pass the --only flag
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -114,9 +120,18 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
-        // Generate output with selected functions
-        generate_output_with_selected_functions(&root, &selected_functions, args.config.as_ref())?
+        // Generate output with selected functions, passing the --only flag
+        generate_output_with_selected_functions(
+            &root,
+            &selected_functions,
+            args.config.as_ref(),
+            args.only,
+        )?
     } else {
+        if args.only {
+            eprintln!("--only flag requires --functions flag");
+            return Ok(());
+        }
         let extensions = determine_extensions(&args)?;
         read_dir_to_string(&root, &root, &extensions)?
     };
@@ -124,7 +139,7 @@ fn main() -> Result<()> {
     let output_buffer = output_buffer.trim();
 
     if output_buffer.is_empty() {
-        eprintln!("No files found matching the criteria.");
+        eprintln!("No content generated with the current selection.");
         return Ok(());
     }
 
@@ -134,7 +149,13 @@ fn main() -> Result<()> {
         .set_text(output_buffer)
         .context("Failed to copy to clipboard")?;
 
-    eprintln!("Content copied to clipboard! You can now paste it into your favorite AI assistant.");
+    if args.only {
+        eprintln!("Selected functions copied to clipboard!");
+    } else {
+        eprintln!(
+            "Content copied to clipboard! You can now paste it into your favorite AI assistant."
+        );
+    }
 
     Ok(())
 }
@@ -422,10 +443,12 @@ fn interactive_select_functions(
     Ok(selected_names)
 }
 
+// Update the generate_output_with_selected_functions to handle --only flag
 fn generate_output_with_selected_functions(
     root: &Path,
     selected_functions: &[String],
     config_path: Option<&PathBuf>,
+    only_selected: bool,
 ) -> Result<String> {
     let extensions = determine_extensions(&Args {
         command: None,
@@ -435,6 +458,7 @@ fn generate_output_with_selected_functions(
         readme: false,
         toml: false,
         all: false,
+        only: false,
     })?;
 
     let mut output_buffer = String::new();
@@ -460,7 +484,7 @@ fn generate_output_with_selected_functions(
         if file_path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let content = fs::read_to_string(&file_path).context("Failed to read file")?;
 
-            // Extract function names that should be kept (not elided) for this specific file
+            // Extract function names that should be kept for this specific file
             let functions_to_keep: Vec<String> = selected_functions
                 .iter()
                 .filter_map(|display_name| {
@@ -473,7 +497,10 @@ fn generate_output_with_selected_functions(
                 })
                 .collect();
 
-            let transformed_content = if functions_to_keep.is_empty() {
+            let transformed_content = if only_selected {
+                // Extract only the selected functions
+                extract_only_selected_functions(&content, &functions_to_keep)
+            } else if functions_to_keep.is_empty() {
                 // If no functions are selected, elide all function bodies
                 transform_rust_file(&content, &[])
             } else {
@@ -481,9 +508,11 @@ fn generate_output_with_selected_functions(
                 transform_rust_file(&content, &functions_to_keep)
             };
 
-            output_buffer.push_str(&format!("// {}\n{}\n", relative_path, transformed_content));
-        } else {
-            // For non-Rust files, include them as-is
+            if !transformed_content.trim().is_empty() {
+                output_buffer.push_str(&format!("// {}\n{}\n", relative_path, transformed_content));
+            }
+        } else if !only_selected {
+            // For non-Rust files, include them only if not using --only
             let file_content = fs::read_to_string(&file_path).context("Failed to read file")?;
             let content_with_newline = if file_content.ends_with('\n') {
                 file_content
@@ -495,6 +524,83 @@ fn generate_output_with_selected_functions(
     }
 
     Ok(output_buffer)
+}
+
+fn extract_only_selected_functions(source: &str, functions_to_keep: &[String]) -> String {
+    if functions_to_keep.is_empty() {
+        return String::new();
+    }
+
+    let parsed = SourceFile::parse(source, ra_ap_syntax::Edition::Edition2024);
+    let root = parsed.tree();
+    let mut result = String::new();
+
+    // Extract standalone functions
+    for func in root.syntax().descendants().filter_map(ast::Fn::cast) {
+        if let Some(name) = func.name() {
+            let func_name = name.text().to_string();
+            if functions_to_keep.contains(&func_name) {
+                let func_text = func.syntax().text().to_string();
+                result.push_str(&func_text);
+                result.push_str("\n\n");
+            }
+        }
+    }
+
+    // Extract methods from impl blocks
+    for impl_block in root.syntax().descendants().filter_map(ast::Impl::cast) {
+        let mut impl_functions = Vec::new();
+        let mut has_selected_functions = false;
+
+        // Check if this impl block has any selected functions
+        for func in impl_block.syntax().descendants().filter_map(ast::Fn::cast) {
+            if let Some(name) = func.name() {
+                let func_name = name.text().to_string();
+                if functions_to_keep.contains(&func_name) {
+                    impl_functions.push(func);
+                    has_selected_functions = true;
+                }
+            }
+        }
+
+        // If we have selected functions in this impl block, include them
+        if has_selected_functions {
+            // Add impl signature
+            result.push_str("impl");
+            if let Some(generic_params) = impl_block.generic_param_list() {
+                result.push_str(&generic_params.syntax().text().to_string());
+            }
+            if let Some(self_ty) = impl_block.self_ty() {
+                result.push_str(" ");
+                result.push_str(&self_ty.syntax().text().to_string());
+            }
+            if let Some(trait_) = impl_block.trait_() {
+                result.push_str(" for ");
+                result.push_str(&trait_.syntax().text().to_string());
+            }
+            if let Some(where_clause) = impl_block.where_clause() {
+                result.push_str(" ");
+                result.push_str(&where_clause.syntax().text().to_string());
+            }
+            result.push_str(" {\n");
+
+            // Add selected functions
+            for func in impl_functions {
+                let func_text = func.syntax().text().to_string();
+                // Indent the function
+                for line in func_text.lines() {
+                    result.push_str("    ");
+                    result.push_str(line);
+                    result.push('\n');
+                }
+                result.push('\n');
+            }
+
+            result.push_str("}\n\n");
+        }
+    }
+
+    result
 }
 
 fn transform_rust_file(source: &str, functions_to_keep: &[String]) -> String {
@@ -540,7 +646,7 @@ fn collect_files(
         .filter_entry(|e| {
             e.file_name()
                 .to_str()
-                .map(|s| !s.starts_with('.') && s != "target" && s != "node_modules")
+                .map(|s| !s.starts_with('.') && s != "target")
                 .unwrap_or(false)
         })
         .build();
