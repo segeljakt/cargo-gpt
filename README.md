@@ -18,35 +18,70 @@ cargo gpt
 
 ## Output
 
-    ```toml
-    // Cargo.toml
-    [package]
-    name = "hello-world"
-    version = "0.1.0"
-    edition = "2021"
+The following output is copied to clipboard:
 
-    # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+```rs
+// src/main.rs
+fn main() {
+    println!("Hello, world!");
+}
+```
 
-    [dependencies]
-    ```
-    ```rs
-    // src/main.rs
-    fn main() {
-        println!("Hello, world!");
-    }
-    ```
+## Advanced Features
 
-### Copying to clipboard
+Assume you have this project:
 
-You can also copy the output directly to clipboard using:
+```rs
+fn main() {
+    interesting_function();
+}
+
+fn interesting_function() {
+    println!("This is an interesting function!");
+}
+
+fn not_interesting_function() {
+    println!("This is not an interesting function!");
+}
+```
+
+You can filter the output to only include the interesting function:
 
 ```sh
-cd /path/to/crate
-
-cargo gpt | pbcopy  # macOS
-cargo gpt | setclip # Linux
-cargo gpt | clip    # Windows
+cargo-gpt-test ❯ cargo gpt --functions
+? Select functions/methods to include:
+> [x] src/main.rs::interesting_function
+  [x] src/main.rs::main
+  [ ] src/main.rs::not_interesting_function
+[↑↓/jk: navigate, space: toggle, a: select all, i: invert, r: clear all, enter: confirm]
 ```
+
+Will copy the following to clipboard:
+
+```rs
+// src/main.rs
+fn main() {
+    interesting_function();
+}
+
+fn interesting_function() {
+    println!("This is an interesting function!");
+}
+
+fn not_interesting_function()  { /* ... */ }
+```
+
+### More options
+
+```sh
+cargo gpt --print # Prints to stdout instead of copying to clipboard
+cargo gpt --readme --toml # Includes README.md and Cargo.toml
+cargo gpt --functions --only # Only include the selected functions
+cargo gpt --all # Include all functions in all .rs files
+cargo gpt explain # Run cargo check and copy the output to clipboard if there are errors
+```
+
+
 
 ## Future Extensions
 

@@ -60,7 +60,7 @@ struct Args {
     print: bool,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// Run cargo check and copy error output to clipboard for GPT analysis
     Explain {
@@ -97,13 +97,20 @@ impl Default for Config {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args: Vec<String> = std::env::args().collect();
+
+    // Remove "gpt" if it's the first argument (cargo subcommand)
+    if args.len() > 1 && args[1] == "gpt" {
+        args.remove(1);
+    }
+
+    let args = Args::parse_from(args);
 
     // Handle subcommands first
     if let Some(command) = args.command {
         match command {
             Commands::Explain { context } => {
-                return explain_cargo_errors(context);
+                return explain_cargo_errors(args.print, context);
             }
         }
     }
@@ -119,14 +126,19 @@ fn main() -> Result<()> {
         // Write directly to stdout
         let stdout = io::stdout();
         let mut stdout_lock = stdout.lock();
-        
+
         if args.functions {
             let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
             if selected_functions.is_empty() {
                 eprintln!("No functions selected.");
                 return Ok(());
             }
-            generate_output_with_selected_functions(&root, &selected_functions, &args, &mut stdout_lock)?;
+            generate_output_with_selected_functions(
+                &root,
+                &selected_functions,
+                &args,
+                &mut stdout_lock,
+            )?;
         } else {
             if args.only {
                 eprintln!("--only flag requires --functions flag");
@@ -145,7 +157,12 @@ fn main() -> Result<()> {
             }
 
             let mut buffer = Vec::new();
-            generate_output_with_selected_functions(&root, &selected_functions, &args, &mut buffer)?;
+            generate_output_with_selected_functions(
+                &root,
+                &selected_functions,
+                &args,
+                &mut buffer,
+            )?;
             String::from_utf8(buffer).context("Invalid UTF-8 in output")?
         } else {
             if args.only {
@@ -221,7 +238,7 @@ fn load_config(config_path: Option<&PathBuf>) -> Result<Config> {
     toml::from_str(&config_content).context("Failed to parse config file")
 }
 
-fn explain_cargo_errors(additional_context: Option<String>) -> Result<()> {
+fn explain_cargo_errors(print: bool, additional_context: Option<String>) -> Result<()> {
     println!("Running cargo check...");
 
     // Run cargo check and capture both stdout and stderr
@@ -231,15 +248,15 @@ fn explain_cargo_errors(additional_context: Option<String>) -> Result<()> {
         .output()
         .context("Failed to run cargo check - make sure you're in a Rust project directory")?;
 
+    if output.status.success() {
+        println!("✅ No errors to explain! cargo check completed successfully.");
+        return Ok(());
+    }
+
     // Combine stdout and stderr
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined_output = format!("{}{}", stdout, stderr).trim().to_string();
-
-    if combined_output.is_empty() {
-        println!("✅ No errors to explain! cargo check completed successfully.");
-        return Ok(());
-    }
 
     // Create the prompt for GPT
     let mut prompt = String::from("Help me understand and fix these Rust compilation errors:\n\n");
@@ -252,6 +269,12 @@ fn explain_cargo_errors(additional_context: Option<String>) -> Result<()> {
     prompt.push_str(&combined_output);
     prompt.push_str("\n```\n\n");
     prompt.push_str("Please explain what's wrong and suggest how to fix it.");
+
+    if print {
+        // Print the prompt to stdout
+        println!("{}", prompt);
+        return Ok(());
+    }
 
     // Copy to clipboard
     let mut clipboard = Clipboard::new().context("Failed to access clipboard")?;
@@ -737,7 +760,12 @@ fn should_include_file(path: &Path, extensions: &HashSet<String>) -> bool {
     false
 }
 
-fn read_file_to_writer<W: Write>(path: &Path, root: &Path, writer: &mut W, use_copy: bool) -> Result<()> {
+fn read_file_to_writer<W: Write>(
+    path: &Path,
+    root: &Path,
+    writer: &mut W,
+    use_copy: bool,
+) -> Result<()> {
     let relative_path = path
         .strip_prefix(root)
         .context("Failed to strip prefix")?
@@ -796,3 +824,4 @@ fn read_dir_to_writer<W: Write>(
 
     Ok(())
 }
+
