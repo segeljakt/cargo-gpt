@@ -31,7 +31,7 @@ fn read_dir(path: &Path, root: &Path, writer: &mut impl Write) -> Result<(), std
         {
             let Some(ext) = entry.path().extension() else { continue };
             let Some(ext) = ext.to_str() else { continue };
-            if ext == "rs" || ext == "md" || entry.file_name() == "Cargo.toml" {
+            if ext == "rs" || entry.file_name() == "Cargo.toml" || ext == "go" {
                 read_file(entry.path(), root, writer)?;
             }
         }
