@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
@@ -119,26 +119,21 @@ fn main() -> Result<()> {
         // Write directly to stdout
         let stdout = io::stdout();
         let mut stdout_lock = stdout.lock();
-
+        
         if args.functions {
             let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
             if selected_functions.is_empty() {
                 eprintln!("No functions selected.");
                 return Ok(());
             }
-            generate_output_with_selected_functions(
-                &root,
-                &selected_functions,
-                &args,
-                &mut stdout_lock,
-            )?;
+            generate_output_with_selected_functions(&root, &selected_functions, &args, &mut stdout_lock)?;
         } else {
             if args.only {
                 eprintln!("--only flag requires --functions flag");
                 return Ok(());
             }
             let extensions = determine_extensions(&args)?;
-            read_dir_to_writer(&root, &root, &extensions, &mut stdout_lock)?;
+            read_dir_to_writer(&root, &root, &extensions, &mut stdout_lock, &args)?;
         }
     } else {
         // Collect output in a string buffer for clipboard
@@ -150,12 +145,7 @@ fn main() -> Result<()> {
             }
 
             let mut buffer = Vec::new();
-            generate_output_with_selected_functions(
-                &root,
-                &selected_functions,
-                &args,
-                &mut buffer,
-            )?;
+            generate_output_with_selected_functions(&root, &selected_functions, &args, &mut buffer)?;
             String::from_utf8(buffer).context("Invalid UTF-8 in output")?
         } else {
             if args.only {
@@ -164,7 +154,7 @@ fn main() -> Result<()> {
             }
             let extensions = determine_extensions(&args)?;
             let mut buffer = Vec::new();
-            read_dir_to_writer(&root, &root, &extensions, &mut buffer)?;
+            read_dir_to_writer(&root, &root, &extensions, &mut buffer, &args)?;
             String::from_utf8(buffer).context("Invalid UTF-8 in output")?
         };
 
@@ -747,19 +737,29 @@ fn should_include_file(path: &Path, extensions: &HashSet<String>) -> bool {
     false
 }
 
-fn read_file_to_writer<W: Write>(path: &Path, root: &Path, writer: &mut W) -> Result<()> {
-    let file_content = fs::read_to_string(path).context("Failed to read file")?;
+fn read_file_to_writer<W: Write>(path: &Path, root: &Path, writer: &mut W, use_copy: bool) -> Result<()> {
     let relative_path = path
         .strip_prefix(root)
         .context("Failed to strip prefix")?
         .display();
 
     writeln!(writer, "// {}", relative_path)?;
-    write!(writer, "{}", file_content)?;
-    if !file_content.ends_with('\n') {
+
+    if use_copy {
+        // Use efficient copy for --all flag
+        let mut file = File::open(path).context("Failed to open file")?;
+        std::io::copy(&mut file, writer).context("Failed to copy file")?;
+        // Ensure we end with a newline for separation
+        writeln!(writer)?;
+    } else {
+        // Use string-based approach for potential transformations
+        let file_content = fs::read_to_string(path).context("Failed to read file")?;
+        write!(writer, "{}", file_content)?;
+        if !file_content.ends_with('\n') {
+            writeln!(writer)?;
+        }
         writeln!(writer)?;
     }
-    writeln!(writer)?;
 
     Ok(())
 }
@@ -769,6 +769,7 @@ fn read_dir_to_writer<W: Write>(
     root: &Path,
     extensions: &HashSet<String>,
     writer: &mut W,
+    args: &Args,
 ) -> Result<()> {
     let walk = WalkBuilder::new(path)
         .filter_entry(|e| {
@@ -779,6 +780,8 @@ fn read_dir_to_writer<W: Write>(
         })
         .build();
 
+    let use_copy = args.all;
+
     for entry in walk.filter_map(Result::ok) {
         if entry
             .file_type()
@@ -786,11 +789,10 @@ fn read_dir_to_writer<W: Write>(
             .is_file()
         {
             if should_include_file(entry.path(), extensions) {
-                read_file_to_writer(entry.path(), root, writer)?;
+                read_file_to_writer(entry.path(), root, writer, use_copy)?;
             }
         }
     }
 
     Ok(())
 }
-
