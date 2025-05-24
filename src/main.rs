@@ -26,25 +26,29 @@ struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// File extensions to include (e.g., rs,toml,go)
-    #[arg(short, long, value_delimiter = ',')]
-    extensions: Option<Vec<String>>,
-
     /// Use interactive mode to select functions/methods
     #[arg(short, long)]
-    interactive: bool,
+    functions: bool,
 
     /// Path to config file (defaults to ~/.config/cargo-gpt/config.toml)
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Show default extensions and exit
-    #[arg(long)]
-    show_defaults: bool,
-
     /// Generate default config file and exit
     #[arg(long)]
     generate_config: bool,
+
+    /// Include README files (README.md, README.txt, etc.)
+    #[arg(long)]
+    readme: bool,
+
+    /// Include Cargo.toml
+    #[arg(long)]
+    toml: bool,
+
+    /// Select all functions (no filtering/elision)
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -59,12 +63,8 @@ enum Commands {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Config {
-    /// Default file extensions to include
-    default_extensions: Vec<String>,
-    /// Additional extensions to always include
-    always_include: Option<Vec<String>>,
-    /// Extensions to always exclude
-    exclude: Option<Vec<String>>,
+    toml: Option<bool>,
+    readme: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -81,14 +81,8 @@ struct FunctionInfo {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_extensions: vec![
-                "rs".to_string(),
-                "toml".to_string(),
-                "md".to_string(),
-                "txt".to_string(),
-            ],
-            always_include: Some(vec!["Cargo.toml".to_string(), "README.md".to_string()]),
-            exclude: None,
+            toml: None,
+            readme: None,
         }
     }
 }
@@ -105,15 +99,6 @@ fn main() -> Result<()> {
         }
     }
 
-    if args.show_defaults {
-        let config = Config::default();
-        println!(
-            "Default extensions: {}",
-            config.default_extensions.join(", ")
-        );
-        return Ok(());
-    }
-
     if args.generate_config {
         generate_config_file(args.config.as_ref())?;
         return Ok(());
@@ -122,7 +107,7 @@ fn main() -> Result<()> {
     let root = std::env::current_dir().context("Failed to get current directory")?;
 
     // Collect output in a string buffer
-    let output_buffer = if args.interactive {
+    let output_buffer = if args.functions {
         let selected_functions = interactive_select_functions(&root, args.config.as_ref())?;
         if selected_functions.is_empty() {
             eprintln!("No functions selected.");
@@ -160,23 +145,20 @@ fn determine_extensions(args: &Args) -> Result<HashSet<String>> {
     // 2. Config file
     // 3. Defaults
 
-    if let Some(ref ext_list) = args.extensions {
-        return Ok(ext_list.iter().cloned().collect());
-    }
+    let mut extensions = HashSet::new();
 
-    let config = load_config(args.config.as_ref())?;
+    extensions.insert("rs".to_string()); // Always include Rust files
 
     // Use config file extensions
-    let mut extensions: HashSet<String> = config.default_extensions.into_iter().collect();
+    let config = load_config(args.config.as_ref())?;
 
-    if let Some(always_include) = config.always_include {
-        extensions.extend(always_include);
+    // Add specific files based on flags
+    if args.all || args.readme || config.readme.is_some_and(|v| v) {
+        extensions.insert("README.md".to_string());
     }
 
-    if let Some(exclude) = config.exclude {
-        for ext in exclude {
-            extensions.remove(&ext);
-        }
+    if args.all || args.toml || config.toml.is_some_and(|v| v) {
+        extensions.insert("Cargo.toml".to_string());
     }
 
     Ok(extensions)
@@ -428,7 +410,9 @@ fn interactive_select_functions(
     .with_default(&default_selected)
     .with_vim_mode(true)
     .with_page_size(20) // Show 20 items at once instead of default (7)
-    .with_help_message("↑↓/jk: navigate, space: toggle, enter: confirm")
+    .with_help_message(
+        "↑↓/jk: navigate, space: toggle, a: select all, i: invert, r: clear all, enter: confirm",
+    )
     .prompt()
     .context("Failed to get user selection")?;
 
@@ -445,11 +429,12 @@ fn generate_output_with_selected_functions(
 ) -> Result<String> {
     let extensions = determine_extensions(&Args {
         command: None,
-        extensions: None,
-        interactive: false,
+        functions: false,
         config: config_path.cloned(),
-        show_defaults: false,
         generate_config: false,
+        readme: false,
+        toml: false,
+        all: false,
     })?;
 
     let mut output_buffer = String::new();
