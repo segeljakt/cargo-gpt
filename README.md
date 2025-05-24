@@ -8,11 +8,14 @@ This is a basic utility which writes Rust source code in your crate plus markdow
 cargo install cargo-gpt
 ```
 
-## Usage
+## Example usage
 
 ```sh
+# Create a basic crate
 cargo new --bin hello-world
 cd hello-world
+
+# Copy code to clipboard
 cargo gpt
 ```
 
