@@ -5,7 +5,7 @@ This is a basic utility which writes Rust source code in your crate plus markdow
 ## Installation
 
 ```sh
-cargo install cargo-gpt
+cargo install --git https://github.com/segeljakt/cargo-gpt
 ```
 
 ## Example usage
